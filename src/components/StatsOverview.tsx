@@ -3,20 +3,24 @@ import { Download, Upload, Users, HardDrive } from 'lucide-react';
 import { formatSpeed, formatBytes } from '../utils/formatters';
 
 interface StatsOverviewProps {
-  totalDownloadSpeed: number;
-  totalUploadSpeed: number;
-  totalPeers: number;
-  totalSize: number;
-  activeTorrents: number;
+  stats: {
+    totalDownloadSpeed: number;
+    totalUploadSpeed: number;
+    totalPeers: number;
+    totalSize: number;
+    activeTorrents: number;
+  };
 }
 
-export const StatsOverview: React.FC<StatsOverviewProps> = ({
-  totalDownloadSpeed,
-  totalUploadSpeed,
-  totalPeers,
-  totalSize,
-  activeTorrents,
-}) => {
+export const StatsOverview: React.FC<StatsOverviewProps> = ({ stats }) => {
+  const {
+    totalDownloadSpeed,
+    totalUploadSpeed,
+    totalPeers,
+    totalSize,
+    activeTorrents,
+  } = stats;
+
   return (
     <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-8">
       <div className="bg-white rounded-xl shadow-md p-4 border border-gray-100">

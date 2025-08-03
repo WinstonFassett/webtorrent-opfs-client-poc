@@ -18,6 +18,6 @@ export interface TorrentInfo {
   numPeers: number;
   ratio: number;
   timeRemaining: number;
-  status: 'downloading' | 'seeding' | 'paused' | 'error' | 'completed' | 'stalled';
+  status: 'downloading' | 'seeding' | 'paused' | 'error' | 'completed' | 'stalled' | 'verifying';
   paused: boolean;
 }

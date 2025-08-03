@@ -49,7 +49,6 @@ export class WebTorrentOPFSPieceStore {
     try {
       this.torrentDir = await opfsManager.createTorrentDirectory(this.infoHash);
       this.initialized = true;
-      console.log(`OPFS store initialized for torrent ${this.infoHash}, file ${this.fileIndex}`);
     } catch (error) {
       console.error('Failed to initialize OPFS store:', error);
       throw error;
@@ -71,15 +70,12 @@ export class WebTorrentOPFSPieceStore {
   }
 
   put(index: number, buf: ArrayBuffer, cb?: (error?: Error) => void): void {
-    console.log(`💾 OPFS PUT: Storing piece ${index} for file ${this.fileIndex}, size: ${buf.byteLength}`);
-    
     this.putAsync(index, buf)
       .then(() => {
-        console.log(`✅ OPFS PUT SUCCESS: Stored piece ${index}, now available for serving`);
         if (cb) cb();
       })
       .catch((error) => {
-        console.error(`💥 OPFS PUT ERROR: Failed to store piece ${index}:`, error);
+        console.error(`Failed to store piece ${index}:`, error);
         if (cb) cb(error);
       });
   }
@@ -95,46 +91,34 @@ export class WebTorrentOPFSPieceStore {
     await opfsManager.writeFile(this.torrentDir, chunkFileName, buf);
   }
 
-  get(index: number, opts: any, cb?: (error?: Error, buffer?: ArrayBuffer) => void): void {
-    console.log(`🔍 OPFS GET: Peer requesting piece ${index} for file ${this.fileIndex}, opts:`, typeof opts, cb ? 'with callback' : 'no callback');
-    
+  get(index: number, opts: any, cb?: (error?: Error | null, buffer?: Buffer | null) => void): void {
     // Handle callback-only case (opts is actually callback)
     if (typeof opts === 'function' && !cb) {
-      this.getAsync(index, {})
-        .then((buffer) => {
-          if (buffer) {
-            console.log(`✅ OPFS GET SUCCESS: Serving piece ${index} to peer, size: ${buffer.byteLength} bytes`);
-            // WebTorrent expects Buffer, not ArrayBuffer
-            const nodeBuffer = Buffer.from(buffer);
-            opts(null, nodeBuffer);
-          } else {
-            console.log(`❌ OPFS GET MISS: Piece ${index} not found in storage`);
-            opts(null, null);
-          }
-        })
-        .catch((error) => {
-          console.error(`💥 OPFS GET ERROR: Failed to get piece ${index}:`, error);
-          opts(error);
-        });
+      cb = opts;
+      opts = {};
+    }
+
+    // Ensure we have a callback
+    if (!cb) return;
+
+    // If not initialized yet, return error
+    if (!this.initialized) {
+      cb(new Error('Store not initialized'));
       return;
     }
     
-    // Handle normal case with opts and callback
     this.getAsync(index, opts || {})
       .then((buffer) => {
         if (buffer) {
-          console.log(`✅ OPFS GET SUCCESS: Serving piece ${index} to peer, size: ${buffer.byteLength} bytes`);
           // WebTorrent expects Buffer, not ArrayBuffer
           const nodeBuffer = Buffer.from(buffer);
           if (cb) cb(null, nodeBuffer);
         } else {
-          console.log(`❌ OPFS GET MISS: Piece ${index} not found in storage`);
           if (cb) cb(null, null);
         }
       })
       .catch((error) => {
-        console.error(`💥 OPFS GET ERROR: Failed to get piece ${index}:`, error);
-        if (cb) cb(error);
+        if (cb) cb(error instanceof Error ? error : new Error(String(error)));
       });
   }
 
@@ -146,36 +130,47 @@ export class WebTorrentOPFSPieceStore {
     }
 
     const chunkFileName = this.getChunkFileName(index);
-    console.log(`📁 OPFS: Looking for file ${chunkFileName} in torrent ${this.infoHash}`);
     
-    const file = await opfsManager.readFile(this.torrentDir, chunkFileName);
-    
-    if (file !== null) {
-      const buffer = await file.arrayBuffer();
-      const start = opts.offset || 0;
-      const length = opts.length || buffer.byteLength - start;
-      const end = start + length;
+    try {
+      const file = await opfsManager.readFile(this.torrentDir, chunkFileName);
       
-      console.log(`📖 OPFS: Read piece ${index}, full size: ${buffer.byteLength}, requested: ${start}-${end}`);
-      return buffer.slice(start, end);
+      if (file !== null) {
+        let buffer: ArrayBuffer;
+        try {
+          buffer = await file.arrayBuffer();
+        } catch (error) {
+          console.warn(`⚠️ OPFS: Error reading buffer for piece ${index}:`, error);
+          return null;
+        }
+        
+        if (!buffer || !(buffer instanceof ArrayBuffer) || buffer.byteLength === 0) {
+          console.warn(`⚠️ OPFS: Buffer is null for piece ${index} for ${this.fileName}`);
+          return null;
+        }
+        
+        const start = opts.offset || 0;
+        const length = opts.length || buffer.byteLength - start;
+        const end = start + length;
+        
+        // console.log(`📖 OPFS: Read piece ${index} for ${this.fileName}, full size: ${buffer.byteLength}, requested: ${start}-${end}`);
+        return buffer.slice(start, end);
+      }
+      
+      // File doesn't exist - this is normal for pieces we haven't downloaded yet
+      return null;
+    } catch (error) {
+      console.warn(`⚠️ OPFS: Error reading piece ${index} for ${this.fileName}:`, error);
+      return null;
     }
-    
-    console.log(`❌ OPFS: File ${chunkFileName} not found in storage`);
-    return null;
   }
 
   close(cb?: (error?: Error) => void): void {
-    console.log(`OPFS CLOSE: Closing store for file ${this.fileIndex}`);
-    // Nothing to close for OPFS
     if (cb && typeof cb === 'function') {
       cb();
     }
   }
 
   destroy(cb?: (error?: Error) => void): void {
-    console.log(`🗑️ OPFS DESTROY: Destroying store for file ${this.fileIndex}`);
-    
-    // Remove from instances map
     const key = `${this.infoHash}_${this.fileIndex}`;
     WebTorrentOPFSPieceStore.instances.delete(key);
     
@@ -186,7 +181,7 @@ export class WebTorrentOPFSPieceStore {
         }
       })
       .catch((error) => {
-        console.error(`OPFS DESTROY ERROR: Failed to destroy store for file ${this.fileIndex}:`, error);
+        console.error('Failed to destroy store:', error);
         if (cb && typeof cb === 'function') {
           cb(error instanceof Error ? error : new Error(String(error)));
         }
@@ -197,14 +192,18 @@ export class WebTorrentOPFSPieceStore {
     await this.ensureInitialized();
     
     if (this.torrentDir && this.infoHash) {
-      // Clean up chunk files for this file
-      const files = await opfsManager.listTorrentFiles(this.infoHash);
-      const chunkFiles = files.filter(f => f.startsWith('__tmp__webtorrent.chunk.'));
-      
-      for (const chunkFile of chunkFiles) {
-        await opfsManager.deleteFile(this.torrentDir, chunkFile);
+      try {
+        // Clean up chunk files for this file
+        const files = await opfsManager.listTorrentFiles(this.infoHash);
+        const chunkFiles = files.filter(f => f.startsWith('__tmp__webtorrent.chunk.'));
+        
+        for (const chunkFile of chunkFiles) {
+          await opfsManager.deleteFile(this.torrentDir, chunkFile);
+        }
+        console.log(`🧹 OPFS: Cleaned up ${chunkFiles.length} chunks for file ${this.fileIndex}`);
+      } catch (error) {
+        console.warn(`⚠️ OPFS: Error during cleanup for file ${this.fileIndex}:`, error);
       }
-      console.log(`OPFS: Cleaned up ${chunkFiles.length} chunks for file ${this.fileIndex}`);
     }
   }
 }
@@ -229,9 +228,9 @@ export class WebTorrentOPFSStore {
     try {
       const torrentDir = await opfsManager.createTorrentDirectory(infoHash);
       this.torrentDirs.set(infoHash, torrentDir);
-      console.log(`Initialized OPFS storage for torrent: ${infoHash}`);
+      console.log(`✅ Initialized OPFS storage for torrent: ${infoHash}`);
     } catch (error) {
-      console.warn('Failed to initialize torrent:', error);
+      console.warn('⚠️ Failed to initialize torrent:', error);
     }
   }
 
@@ -241,9 +240,9 @@ export class WebTorrentOPFSStore {
     try {
       await opfsManager.deleteTorrentDirectory(infoHash);
       this.torrentDirs.delete(infoHash);
-      console.log(`Deleted OPFS storage for torrent: ${infoHash}`);
+      console.log(`🗑️ Deleted OPFS storage for torrent: ${infoHash}`);
     } catch (error) {
-      console.warn('Failed to delete torrent:', error);
+      console.warn('⚠️ Failed to delete torrent:', error);
     }
   }
 
@@ -258,9 +257,9 @@ export class WebTorrentOPFSStore {
     try {
       await opfsManager.deleteTorrentDirectory(infoHash);
       this.torrentDirs.delete(infoHash);
-      console.log(`Cleaned up OPFS storage for torrent: ${infoHash}`);
+      console.log(`🧹 Cleaned up OPFS storage for torrent: ${infoHash}`);
     } catch (error) {
-      console.warn('Failed to cleanup torrent:', error);
+      console.warn('⚠️ Failed to cleanup torrent:', error);
     }
   }
 }

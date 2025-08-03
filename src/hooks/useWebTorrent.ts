@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import WebTorrent from 'webtorrent';
 import { TorrentInfo } from '../types';
-import { opfsManager } from '../utils/opfs';
+import { opfsManager, StoredTorrentMeta } from '../utils/opfs';
 import { webTorrentOPFSStore, createOPFSStore } from '../utils/webTorrentOPFS';
 
 export const useWebTorrent = () => {
@@ -13,38 +13,44 @@ export const useWebTorrent = () => {
   const [storageInfo, setStorageInfo] = useState<StorageEstimate | null>(null);
 
   // Convert WebTorrent instance to TorrentInfo
-  const convertTorrent = useCallback((torrent: any): TorrentInfo => {
-    // Use progress override for seeding visualization if set
+  const convertTorrent = useCallback((torrent: any, storedMeta?: StoredTorrentMeta): TorrentInfo => {
+    // Use overridden progress if available (important for seeded torrents)
     const progress = torrent._progressOverride !== undefined ? torrent._progressOverride : torrent.progress;
     
-    // Calculate status based on torrent state
-    let status = 'downloading';
-    if (progress >= 1) {
-      status = 'completed';
+    let status: TorrentInfo['status'] = 'downloading';
+    
+    // Handle status
+    if (torrent.verifying) {
+      status = 'verifying';
     } else if (torrent.paused) {
       status = 'paused';
-    } else if (torrent.downloadSpeed === 0 && torrent.numPeers === 0 && progress < 1) {
+    } else if (progress >= 0.999) {
+      status = torrent.uploaded > 0 ? 'seeding' : 'completed';
+    } else if ((torrent.downloadSpeed || 0) === 0 && (torrent.numPeers || 0) === 0 && progress < 1) {
       status = 'stalled';
     }
 
-    // Calculate time remaining (convert from ms to seconds)
-    const timeRemaining = torrent.timeRemaining ? Math.floor(torrent.timeRemaining / 1000) : null;
+    const timeRemaining = torrent.timeRemaining && torrent.timeRemaining !== Infinity 
+      ? Math.floor(torrent.timeRemaining / 1000) 
+      : 0;
 
-    // Calculate ratio
-    const ratio = torrent.downloaded > 0 ? torrent.uploaded / torrent.downloaded : 0;
+    const downloaded = torrent.downloaded || 0;
+    const uploaded = torrent.uploaded || 0;
+    const ratio = downloaded > 0 ? uploaded / downloaded : 0;
 
+    // Use stored metadata for critical fields when available
     return {
-      infoHash: torrent.infoHash,
-      name: torrent.name || 'Unknown',
-      length: torrent.length || 0,
-      downloaded: torrent.downloaded || 0,
-      uploaded: torrent.uploaded || 0,
+      infoHash: torrent.infoHash || '',
+      name: storedMeta?.name || torrent.name || 'Unknown',
+      length: storedMeta?.length || torrent.length || 0,
+      downloaded,
+      uploaded,
       downloadSpeed: torrent.downloadSpeed || 0,
       uploadSpeed: torrent.uploadSpeed || 0,
       progress: progress || 0,
       numPeers: torrent.numPeers || 0,
       paused: torrent.paused || false,
-      files: torrent.files || [],
+      files: storedMeta?.files || torrent.files || [],
       magnetURI: torrent.magnetURI || '',
       timeRemaining,
       status,
@@ -64,28 +70,104 @@ export const useWebTorrent = () => {
     }
   }, [opfsSupported]);
 
-  // Initialize WebTorrent client
+  // Load existing torrents from OPFS
+  const loadExistingTorrents = useCallback(async (webTorrentClient: WebTorrent.Instance) => {
+    try {
+      const metas = await opfsManager.getAllTorrentMetas();
+      console.log(`📂 Found ${metas.length} stored torrents in OPFS`);
+
+      // Add all torrents immediately and get their objects
+      const addedTorrents = metas.map(meta => {
+        console.log('Adding torrent to WebTorrent:', meta.name, {
+          isSeeded: meta.isSeeded,
+          isVerified: meta.isVerified
+        });
+        
+        const torrent = webTorrentClient.add(meta.magnetURI, {
+          store: createOPFSStore,
+          skipVerify: !meta.isSeeded // Only verify seeded torrents
+        });
+        
+        // If this is a seeded torrent that hasn't been verified yet
+        if (meta.isSeeded && !meta.isVerified) {
+          console.log(`🔍 Requiring verification for seeded torrent: ${meta.name}`);
+          torrent._progressOverride = 0;
+        }
+        
+        // Set up background initialization
+        torrent.on('ready', async () => {
+          if (torrent.infoHash) {
+            await webTorrentOPFSStore.initializeTorrent(torrent.infoHash);
+          }
+        });
+
+        torrent.on('verifying', () => {
+          console.log(`🔄 Verifying torrent: ${torrent.name}`);
+          if (meta.isSeeded) {
+            torrent._progressOverride = 0;
+          }
+          updateTorrents();
+        });
+
+        torrent.on('verify', async () => {
+          console.log(`✅ Torrent verified: ${torrent.name}`);
+          if (meta.isSeeded) {
+            // Update metadata to mark as verified
+            await storeTorrentMeta({
+              ...torrent,
+              isSeeded: true,
+              isVerified: true
+            });
+            torrent._progressOverride = 1;
+          }
+          updateTorrents();
+        });
+        
+        torrent.on('error', (err: Error) => {
+          console.error(`Torrent error: ${err.message}`);
+          setError(`Torrent error: ${err.message}`);
+        });
+
+        return torrent;
+      });
+
+      // Update UI with all torrents at once, using stored metadata
+      setTorrents(addedTorrents.map((torrent, index) => convertTorrent(torrent, metas[index])));
+    } catch (error) {
+      console.warn('⚠️ Failed to load existing torrents:', error);
+      setIsLoading(false);
+    }
+  }, []); // Remove dependency on opfsSupported since we check it in the parent effect
+
+  // Initialize WebTorrent client and OPFS
   useEffect(() => {
+    let mounted = true;
     const initializeClient = async () => {
       try {
-        // Check OPFS support
+        // Check OPFS support first
         const supported = opfsManager.isSupported();
+        if (!mounted) return;
         setOpfsSupported(supported);
         
+        // Initialize OPFS if supported
         if (supported) {
           await opfsManager.initialize();
-          console.log('OPFS initialized successfully');
+          if (!mounted) return;
           
-          // Get storage info
           const estimate = await opfsManager.getStorageEstimate();
+          if (!mounted) return;
           setStorageInfo(estimate);
         } else {
-          console.warn('OPFS not supported, falling back to memory storage');
+          console.warn('⚠️ OPFS not supported, falling back to memory storage');
         }
 
+        // Initialize WebTorrent
         const webTorrentClient = new WebTorrent();
-        
-        // Store client globally for file downloads
+        if (!mounted) {
+          webTorrentClient.destroy();
+          return;
+        }
+
         (window as any).webTorrentClient = webTorrentClient;
         
         webTorrentClient.on('error', (err: Error) => {
@@ -94,40 +176,58 @@ export const useWebTorrent = () => {
         });
 
         setClient(webTorrentClient);
+
+        // Load existing torrents after client is ready
+        if (supported) {
+          await loadExistingTorrents(webTorrentClient);
+        }
+        if (!mounted) {
+          webTorrentClient.destroy();
+          return;
+        }
         setIsLoading(false);
 
       } catch (err) {
         console.error('Failed to initialize:', err);
-        setError(`Initialization failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
-        setIsLoading(false);
+        if (mounted) {
+          setError(`Initialization failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
+          setIsLoading(false);
+        }
       }
     };
 
     initializeClient();
 
     return () => {
+      mounted = false;
       if (client) {
         client.destroy();
         delete (window as any).webTorrentClient;
       }
     };
-  }, []);
+  }, []); // Remove loadExistingTorrents dependency since it no longer depends on state
 
   // Update storage info periodically
   useEffect(() => {
     if (!opfsSupported) return;
 
-    const interval = setInterval(updateStorageInfo, 30000); // Update every 30 seconds
+    const interval = setInterval(updateStorageInfo, 30000);
     return () => clearInterval(interval);
   }, [opfsSupported, updateStorageInfo]);
 
   // Update torrents list
-  const updateTorrents = useCallback(() => {
+  const updateTorrents = useCallback(async () => {
     if (!client) return;
     
-    const updatedTorrents = client.torrents.map(convertTorrent);
+    // Get stored metadata for each torrent
+    const metas = opfsSupported ? await opfsManager.getAllTorrentMetas() : [];
+    const metaMap = new Map(metas.map(meta => [meta.infoHash, meta]));
+    
+    const updatedTorrents = client.torrents.map((torrent: any) => 
+      convertTorrent(torrent, metaMap.get(torrent.infoHash))
+    );
     setTorrents(updatedTorrents);
-  }, [client, convertTorrent]);
+  }, [client, convertTorrent, opfsSupported]);
 
   // Set up periodic updates
   useEffect(() => {
@@ -136,6 +236,30 @@ export const useWebTorrent = () => {
     const interval = setInterval(updateTorrents, 1000);
     return () => clearInterval(interval);
   }, [client, updateTorrents]);
+
+  // Store torrent metadata when adding
+  const storeTorrentMeta = useCallback(async (torrent: any) => {
+    if (!opfsSupported || !torrent.infoHash) return;
+
+    const meta: StoredTorrentMeta = {
+      infoHash: torrent.infoHash,
+      name: torrent.name,
+      magnetURI: torrent.magnetURI,
+      length: torrent.length,
+      files: torrent.files.map((f: any) => ({
+        name: f.name,
+        length: f.length,
+        path: f.path
+      })),
+      createdAt: Date.now()
+    };
+
+    try {
+      await opfsManager.storeTorrentMeta(meta);
+    } catch (error) {
+      console.warn('Failed to store torrent meta:', error);
+    }
+  }, [opfsSupported]);
 
   // Add torrent
   const addTorrent = useCallback((torrentId: string | File | FileList) => {
@@ -147,111 +271,87 @@ export const useWebTorrent = () => {
     try {
       const torrentOptions: any = {};
       
-      // Use OPFS if supported
       if (opfsSupported) {
         torrentOptions.store = createOPFSStore;
-        console.log('Using OPFS store for torrent');
-      } else {
-        console.log('Using default memory store for torrent');
       }
 
       if (torrentId instanceof FileList) {
-        // Seed multiple files
         const files = Array.from(torrentId);
-        console.log('Seeding files:', files.map(f => f.name));
-        
-        // Don't set progress to 100% immediately when seeding
-        // Let WebTorrent handle the verification process
         client.seed(files, torrentOptions, async (torrent: any) => {
-          console.log('Started seeding:', torrent.name);
-          console.log('Initial seeding progress:', torrent.progress);
+          // Override progress to 0 initially for seeded torrents
+          torrent._progressOverride = 0;
           
-          // Force progress to 0 initially for seeding to show verification process
-          if (torrent.progress === 1) {
-            console.log('Forcing initial progress to 0 for seeding visualization');
-            torrent._progressOverride = 0;
-          }
-          
-          // Set up torrent event handlers
           torrent.on('ready', async () => {
-            console.log('Torrent ready:', torrent.name);
-            console.log('Progress when ready:', torrent.progress);
-            console.log('Torrent files:', torrent.files.map((f: any) => ({ name: f.name, length: f.length })));
-            console.log('Torrent pieces:', torrent.pieces ? torrent.pieces.length : 'unknown');
+            console.log(`🌱 Seeded torrent ready: ${torrent.name}`);
             if (opfsSupported && torrent.infoHash) {
               await webTorrentOPFSStore.initializeTorrent(torrent.infoHash);
-              // List what files are actually stored
-              const storedFiles = await webTorrentOPFSStore.getTorrentFiles(torrent.infoHash);
-              console.log('Files stored in OPFS:', storedFiles);
+              // Store initial metadata
+              await storeTorrentMeta({
+                ...torrent,
+                isSeeded: true, // Mark as seeded
+                _progressOverride: 0 // Force progress to 0 until verified
+              });
             }
             updateTorrents();
           });
+
+          // Wait for the metadata to be fully generated
+          torrent.on('metadata', async () => {
+            console.log(`📦 Seeded torrent metadata generated: ${torrent.name}`);
+            if (opfsSupported && torrent.infoHash) {
+              // Update metadata with complete info
+              await storeTorrentMeta({
+                ...torrent,
+                isSeeded: true,
+                _progressOverride: 0
+              });
+            }
+          });
           
+          // Only mark as complete after verification
+          torrent.on('verifying', () => {
+            console.log(`🔍 Verifying seeded torrent: ${torrent.name}`);
+            torrent._progressOverride = 0;
+            updateTorrents();
+          });
+
           torrent.on('verify', () => {
-            console.log('Piece verified, progress:', torrent.progress);
-            // Update progress override during verification
-            if (torrent._progressOverride !== undefined && torrent._progressOverride < 1) {
-              torrent._progressOverride = Math.min(torrent._progressOverride + (1 / torrent.pieces.length), 1);
-            }
+            console.log(`✅ Verified seeded torrent: ${torrent.name}`);
+            torrent._progressOverride = 1; // Now we can mark it as complete
             updateTorrents();
           });
           
-          torrent.on('download', () => {
-            console.log(`📥 Download: ${(torrent.progress * 100).toFixed(1)}% (${torrent.downloaded}/${torrent.length} bytes)`);
-            updateTorrents();
-          });
-          
-          torrent.on('upload', () => {
-            console.log(`📤 Upload: ${torrent.uploaded} bytes uploaded to peers`);
-            updateTorrents();
-          });
+          torrent.on('upload', () => updateTorrents());
+          torrent.on('download', () => updateTorrents());
           
           torrent.on('error', (err: Error) => {
-            console.error('Torrent error:', err);
+            console.error('Torrent error:', err.message);
             setError(`Torrent error: ${err.message}`);
           });
           
           updateTorrents();
         });
       } else {
-        // Add torrent (magnet link or .torrent file)
-        console.log('Adding torrent:', typeof torrentId === 'string' ? 'magnet link' : 'torrent file');
         client.add(torrentId, torrentOptions, async (torrent: any) => {
-          console.log('Added torrent:', torrent.name);
-          console.log('Initial download progress:', torrent.progress);
+          if (opfsSupported && torrent.infoHash) {
+            await webTorrentOPFSStore.initializeTorrent(torrent.infoHash);
+            // Store metadata as soon as we have an infoHash
+            await storeTorrentMeta(torrent);
+          }
           
-          // Set up torrent event handlers
           torrent.on('ready', async () => {
-            console.log('Torrent ready:', torrent.name);
-            console.log('Progress when ready:', torrent.progress);
-            console.log('Torrent files:', torrent.files.map((f: any) => ({ name: f.name, length: f.length })));
-            console.log('Torrent pieces:', torrent.pieces ? torrent.pieces.length : 'unknown');
-            if (opfsSupported && torrent.infoHash) {
-              await webTorrentOPFSStore.initializeTorrent(torrent.infoHash);
-              // List what files are actually stored
-              const storedFiles = await webTorrentOPFSStore.getTorrentFiles(torrent.infoHash);
-              console.log('Files stored in OPFS:', storedFiles);
-            }
+            // Update metadata again after ready in case more info is available
+            await storeTorrentMeta(torrent);
             updateTorrents();
           });
           
-          torrent.on('verify', () => {
-            console.log('Piece verified, progress:', torrent.progress);
-            updateTorrents();
-          });
-          
-          torrent.on('download', () => {
-            console.log(`📥 Download: ${(torrent.progress * 100).toFixed(1)}% (${torrent.downloaded}/${torrent.length} bytes)`);
-            updateTorrents();
-          });
-          
-          torrent.on('upload', () => {
-            console.log(`📤 Upload: ${torrent.uploaded} bytes uploaded to peers`);
-            updateTorrents();
-          });
+          torrent.on('verify', () => updateTorrents());
+          torrent.on('download', () => updateTorrents());
+          torrent.on('upload', () => updateTorrents());
+          torrent.on('verifying', () => updateTorrents());
           
           torrent.on('error', (err: Error) => {
-            console.error('Torrent error:', err);
+            console.error('Torrent error:', err.message);
             setError(`Torrent error: ${err.message}`);
           });
           
@@ -260,10 +360,10 @@ export const useWebTorrent = () => {
       }
       setError(null);
     } catch (err) {
-      console.error('Failed to add torrent:', err);
+      console.error('💥 Failed to add torrent:', err);
       setError(`Failed to add torrent: ${err instanceof Error ? err.message : 'Unknown error'}`);
     }
-  }, [client, updateTorrents, opfsSupported]);
+  }, [client, updateTorrents, opfsSupported, storeTorrentMeta]);
 
   // Pause torrent
   const pauseTorrent = useCallback((infoHash: string) => {
@@ -296,11 +396,15 @@ export const useWebTorrent = () => {
         console.error('Failed to remove torrent:', err);
         setError(`Failed to remove torrent: ${err.message}`);
       } else {
-        console.log('Torrent removed successfully');
-        // Clean up OPFS storage
+        console.log('✅ Torrent removed successfully');
+        
+        // Clean up OPFS storage and metadata
         if (opfsSupported && infoHash) {
           try {
             await webTorrentOPFSStore.deleteTorrent(infoHash);
+            await opfsManager.deleteTorrentMeta(infoHash);
+            await opfsManager.deleteTorrentDirectory(infoHash);
+            console.log('🧹 Cleaned up OPFS storage for torrent');
           } catch (error) {
             console.warn('Failed to clean up OPFS storage:', error);
           }
@@ -309,6 +413,45 @@ export const useWebTorrent = () => {
       }
     });
   }, [client, updateTorrents, opfsSupported]);
+
+  // Clear all storage (dev utility)
+  const clearAllStorage = useCallback(async () => {
+    if (!opfsSupported) return;
+
+    try {
+      // Remove all torrents from WebTorrent client
+      if (client) {
+        const torrentHashes = client.torrents.map((t: WebTorrent.Torrent) => t.infoHash);
+        for (const hash of torrentHashes) {
+          client.remove(hash);
+        }
+      }
+
+      // Clear all OPFS storage
+      await opfsManager.clearAllOPFS();
+      
+      // Update UI
+      setTorrents([]);
+      await updateStorageInfo();
+      
+      console.log('🧹 All storage cleared');
+    } catch (error) {
+      console.error('Failed to clear all storage:', error);
+      setError(`Failed to clear storage: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }, [client, opfsSupported, updateStorageInfo]);
+
+  // Get OPFS contents (dev utility)
+  const getOPFSContents = useCallback(async () => {
+    if (!opfsSupported) return [];
+    
+    try {
+      return await opfsManager.getOPFSContents();
+    } catch (error) {
+      console.error('Failed to get OPFS contents:', error);
+      return [];
+    }
+  }, [opfsSupported]);
 
   // Calculate stats
   const stats = {
@@ -327,6 +470,8 @@ export const useWebTorrent = () => {
     pauseTorrent,
     resumeTorrent,
     removeTorrent,
+    clearAllStorage,
+    getOPFSContents,
     stats,
     opfsSupported,
     storageInfo

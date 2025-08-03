@@ -2,6 +2,7 @@ import React from 'react';
 import { Play, Pause, Trash2, Download, Upload, Users, Clock, HardDrive, Link, QrCode, FileDown, Folder, ChevronDown, ChevronRight } from 'lucide-react';
 import { TorrentInfo } from '../types';
 import { formatBytes, formatSpeed, formatTime } from '../utils/formatters';
+import { opfsManager } from '../utils/opfs';
 import QRCode from 'qrcode';
 
 interface TorrentCardProps {
@@ -22,7 +23,6 @@ export const TorrentCard: React.FC<TorrentCardProps> = ({
   const copyMagnetLink = async () => {
     try {
       await navigator.clipboard.writeText(torrent.magnetURI);
-      // You could add a toast notification here
     } catch (err) {
       console.error('Failed to copy magnet link:', err);
     }
@@ -35,7 +35,6 @@ export const TorrentCard: React.FC<TorrentCardProps> = ({
         margin: 2,
       });
       
-      // Create a modal to show the QR code
       const modal = document.createElement('div');
       modal.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50';
       modal.innerHTML = `
@@ -57,7 +56,6 @@ export const TorrentCard: React.FC<TorrentCardProps> = ({
       
       document.body.appendChild(modal);
       
-      // Remove modal when clicking outside
       modal.addEventListener('click', (e) => {
         if (e.target === modal) {
           modal.remove();
@@ -70,155 +68,152 @@ export const TorrentCard: React.FC<TorrentCardProps> = ({
 
   const downloadFile = async (fileIndex: number) => {
     try {
+      console.log(`🔍 DOWNLOAD CHECK for ${torrent.name}:`, {
+        status: torrent.status,
+        progress: torrent.progress,
+        downloaded: torrent.downloaded,
+        length: torrent.length,
+        ratio: torrent.ratio
+      });
+
+      console.log(`🔽 Starting download for file ${fileIndex} from torrent ${torrent.name}`);
+      
+      // Check if torrent is complete - use status instead of progress for better reliability
+      const isComplete = torrent.status === 'completed' || torrent.status === 'seeding' || torrent.progress >= 0.999;
+      
+      if (!isComplete) {
+        console.log(`❌ Torrent not ready: status=${torrent.status}, progress=${torrent.progress}`);
+        alert(`Please wait for the torrent to finish downloading. Status: ${torrent.status}, Progress: ${(torrent.progress * 100).toFixed(1)}%`);
+        return;
+      }
+
       const client = (window as any).webTorrentClient;
       if (!client) {
-        console.error('WebTorrent client not available');
+        console.error('❌ WebTorrent client not available');
+        alert('WebTorrent client not available');
         return;
       }
 
-      const torrentInstance = client.get(torrent.infoHash);
+      const torrentInstance = await client.get(torrent.infoHash);
       if (!torrentInstance) {
-        console.error('Torrent not found');
+        console.error('❌ Torrent not found');
+        alert('Torrent not found');
         return;
       }
 
-      const file = torrentInstance.files[fileIndex];
-      if (!file) {
-        console.error('File not found');
+      if (!torrent.files || torrent.files.length === 0) {
+        console.error('❌ No file information available');
+        alert('No file information available');
         return;
       }
-
-      // Check if OPFS is being used
-      const opfsSupported = 'storage' in navigator && 'getDirectory' in navigator.storage;
       
-      if (opfsSupported) {
-        // For OPFS, we can handle large files efficiently
-        file.getBlobURL((err: any, url: string) => {
-          if (err) {
-            console.error('Error creating download:', err);
-            alert('Failed to create download.');
-            return;
-          }
-
-          // Create and trigger download
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = file.name;
-          a.style.display = 'none';
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
-          
-          // Clean up blob URL after a delay
-          setTimeout(() => URL.revokeObjectURL(url), 1000);
-        });
-      } else {
-        // For memory storage, warn about large files
-        if (file.length > 100 * 1024 * 1024) { // 100MB
-          const proceed = confirm(
-            `This file is ${formatBytes(file.length)}. Large files may cause browser slowdown or crashes due to memory limitations. Continue?`
-          );
-          if (!proceed) return;
-        }
-
-        // Create download using blob URL
-        file.getBlobURL((err: any, url: string) => {
-          if (err) {
-            console.error('Error creating download:', err);
-            alert('Failed to create download. File may be too large for browser memory.');
-            return;
-          }
-
-          // Create and trigger download
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = file.name;
-          a.style.display = 'none';
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
-          
-          // Clean up blob URL after a delay
-          setTimeout(() => URL.revokeObjectURL(url), 1000);
-        });
+      if (fileIndex >= torrent.files.length) {
+        console.error('❌ File index out of range');
+        alert('File index out of range');
+        return;
       }
+
+      const targetFile = torrent.files[fileIndex];
+      console.log(`📁 Target file: ${targetFile.name}, size: ${formatBytes(targetFile.length)}`);
+
+      const wtFile = torrentInstance.files && torrentInstance.files[fileIndex];
+      if (!wtFile) {
+        console.error('❌ WebTorrent file not available');
+        alert('File is not ready for download. Please wait for the torrent to load completely.');
+        return;
+      }
+
+
+      console.log(`🔄 Creating download for file: ${wtFile.name}...`);
+      
+      const createDownload = new Promise<void>((resolve, reject) => {
+        // Create a readable stream from the file
+        const stream = wtFile.createReadStream();
+        const chunks: Uint8Array[] = [];
+
+        stream.on('data', (chunk: Uint8Array) => {
+          chunks.push(chunk);
+        });
+
+        stream.on('end', () => {
+          try {
+            // Concatenate all chunks into a single Uint8Array
+            const totalLength = chunks.reduce((acc, chunk) => acc + chunk.length, 0);
+            const fileData = new Uint8Array(totalLength);
+            let position = 0;
+            for (const chunk of chunks) {
+              fileData.set(chunk, position);
+              position += chunk.length;
+            }
+
+            // Create blob and URL
+            const blob = new Blob([fileData]);
+            const url = URL.createObjectURL(blob);
+
+            // Create and trigger download
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = wtFile.name;
+            a.style.display = 'none';
+            document.body.appendChild(a);
+            
+            console.log(`🚀 Triggering download for ${wtFile.name}`);
+            a.click();
+            
+            document.body.removeChild(a);
+            
+            setTimeout(() => {
+              URL.revokeObjectURL(url);
+              console.log(`🧹 Cleaned up blob URL for ${wtFile.name}`);
+            }, 5000);
+            
+            resolve();
+          } catch (downloadError) {
+            console.error('❌ Error triggering download:', downloadError);
+            reject(downloadError);
+          }
+        });
+
+        stream.on('error', (err: Error) => {
+          console.error('❌ Error reading file stream:', err);
+          reject(new Error(`Failed to read file: ${err.message}`));
+        });
+      });
+
+      await createDownload;
+      console.log(`✅ Download initiated successfully for ${wtFile.name}`);
+      
     } catch (error) {
-      console.error('Download error:', error);
-      alert('Download failed. Please try again.');
+      console.error('💥 Download error:', error);
+      alert(`Download failed: ${error instanceof Error ? error.message : 'Unknown error'}. Please try again.`);
     }
   };
 
   const downloadAllFiles = async () => {
-    const totalSize = torrent.files.reduce((sum, file) => sum + file.length, 0);
-    const opfsSupported = 'storage' in navigator && 'getDirectory' in navigator.storage;
-    
-    // Only warn about size if using memory storage
-    if (!opfsSupported && totalSize > 500 * 1024 * 1024) { // 500MB
-      const proceed = confirm(
-        `Total download size is ${formatBytes(totalSize)}. This may cause browser issues. Continue?`
-      );
-      if (!proceed) return;
+    if (torrent.status !== 'completed' && torrent.status !== 'seeding' && torrent.progress < 0.99) {
+      console.log(`❌ Torrent not ready for batch download: status=${torrent.status}, progress=${torrent.progress}`);
+      alert(`Please wait for the torrent to finish downloading. Status: ${torrent.status}, Progress: ${(torrent.progress * 100).toFixed(1)}%`);
+      return;
     }
 
-    // Download files sequentially to avoid overwhelming the browser
+    console.log(`📦 Starting batch download of ${torrent.files.length} files`);
+
     for (let i = 0; i < torrent.files.length; i++) {
-      await new Promise(resolve => {
-        setTimeout(() => {
-          downloadFile(i);
-          resolve(void 0);
-        }, i * (opfsSupported ? 500 : 1000)); // Shorter delay for OPFS
-      });
-    }
-  };
-
-  const debugStorage = async () => {
-    try {
-      const client = (window as any).webTorrentClient;
-      if (!client) return;
-
-      const torrentInstance = client.get(torrent.infoHash);
-      if (!torrentInstance) return;
-
-      console.log('=== STORAGE DEBUG ===');
-      console.log('Torrent:', torrent.name);
-      console.log('InfoHash:', torrent.infoHash);
-      console.log('Progress:', torrent.progress);
-      console.log('Pieces total:', torrentInstance.pieces ? torrentInstance.pieces.length : 'unknown');
-      
-      if (torrentInstance.pieces) {
-        const completedPieces = torrentInstance.pieces.filter((p: any) => p).length;
-        console.log('Pieces completed:', completedPieces);
+      try {
+        console.log(`📥 Downloading file ${i + 1}/${torrent.files.length}: ${torrent.files[i].name}`);
+        await downloadFile(i);
+        
+        if (i < torrent.files.length - 1) {
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+      } catch (error) {
+        console.error(`❌ Failed to download file ${i}:`, error);
+        const continueDownload = confirm(`Failed to download ${torrent.files[i].name}. Continue with remaining files?`);
+        if (!continueDownload) break;
       }
-
-      // Check OPFS storage
-      const opfsSupported = 'storage' in navigator && 'getDirectory' in navigator.storage;
-      if (opfsSupported) {
-        const { webTorrentOPFSStore } = await import('../utils/webTorrentOPFS');
-        const storedFiles = await webTorrentOPFSStore.getTorrentFiles(torrent.infoHash);
-        console.log('OPFS stored files:', storedFiles);
-      }
-      
-      console.log('=== END DEBUG ===');
-    } catch (error) {
-      console.error('Debug error:', error);
     }
-  };
-
-  const cleanupStorage = async () => {
-    try {
-      const opfsSupported = 'storage' in navigator && 'getDirectory' in navigator.storage;
-      if (!opfsSupported) {
-        alert('OPFS not supported');
-        return;
-      }
-
-      const { webTorrentOPFSStore } = await import('../utils/webTorrentOPFS');
-      await webTorrentOPFSStore.cleanupTorrent(torrent.infoHash);
-      alert('Storage cleaned up');
-    } catch (error) {
-      console.error('Cleanup error:', error);
-      alert('Cleanup failed');
-    }
+    
+    console.log(`✅ Batch download completed`);
   };
 
   const getStatusColor = (status: string) => {
@@ -286,20 +281,6 @@ export const TorrentCard: React.FC<TorrentCardProps> = ({
             >
               <QrCode size={18} />
             </button>
-            <button
-              onClick={debugStorage}
-              className="p-2 text-gray-600 hover:bg-gray-50 rounded-lg transition-colors"
-              title="Debug Storage"
-            >
-              🐛
-            </button>
-            <button
-              onClick={cleanupStorage}
-              className="p-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors"
-              title="Cleanup Storage"
-            >
-              🧹
-            </button>
             {torrent.files.length > 1 && (
               <button
                 onClick={() => setShowFiles(!showFiles)}
@@ -311,6 +292,7 @@ export const TorrentCard: React.FC<TorrentCardProps> = ({
             )}
             <button
               onClick={torrent.files.length === 1 ? () => downloadFile(0) : downloadAllFiles}
+              disabled={torrent.status !== 'completed' && torrent.status !== 'seeding' && torrent.progress < 0.999}
               className="p-2 text-green-600 hover:bg-green-50 rounded-lg transition-colors"
               title={torrent.files.length === 1 ? "Download File" : "Download All Files"}
             >
@@ -429,7 +411,12 @@ export const TorrentCard: React.FC<TorrentCardProps> = ({
                 </div>
                 <button
                   onClick={() => downloadFile(index)}
-                  className="ml-2 p-1 text-green-600 hover:bg-green-50 rounded transition-colors"
+                  disabled={torrent.status !== 'completed' && torrent.status !== 'seeding' && torrent.progress < 0.999}
+                  className={`ml-2 p-1 rounded transition-colors ${
+                    (torrent.status !== 'completed' && torrent.status !== 'seeding' && torrent.progress < 0.999)
+                      ? 'text-gray-400 cursor-not-allowed' 
+                      : 'text-green-600 hover:bg-green-50'
+                  }`}
                   title="Download File"
                 >
                   <FileDown size={16} />

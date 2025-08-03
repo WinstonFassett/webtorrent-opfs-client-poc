@@ -3,6 +3,7 @@ import { TorrentCard } from './components/TorrentCard';
 import { AddTorrentModal } from './components/AddTorrentModal';
 import { StatsOverview } from './components/StatsOverview';
 import { StorageWarning } from './components/StorageWarning';
+import { DevTools } from './components/DevTools';
 import { useWebTorrent } from './hooks/useWebTorrent';
 import { Plus } from 'lucide-react';
 
@@ -17,7 +18,9 @@ function App() {
     removeTorrent,
     stats,
     opfsSupported,
-    storageInfo
+    storageInfo,
+    clearAllStorage,
+    getOPFSContents
   } = useWebTorrent();
 
   const [showAddModal, setShowAddModal] = React.useState(false);
@@ -48,6 +51,13 @@ function App() {
         <StorageWarning 
           opfsSupported={opfsSupported}
           storageInfo={storageInfo}
+        />
+
+        {/* Developer Tools */}
+        <DevTools
+          onClearAllStorage={clearAllStorage}
+          onGetOPFSContents={getOPFSContents}
+          opfsSupported={opfsSupported}
         />
 
         {/* Stats Overview */}
