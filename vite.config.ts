@@ -34,7 +34,6 @@ export default defineConfig({
   resolve: {
     alias: {
       'bittorrent-dht': path.resolve(__dirname, 'src/stubs/bittorrent-dht.ts'),
-      'torrent-discovery': path.resolve(__dirname, 'src/stubs/bittorrent-dht.ts'),
     },
   },
 });
