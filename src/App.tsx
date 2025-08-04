@@ -27,44 +27,33 @@ function App() {
 
   // Handle torrent from URL hash
   React.useEffect(() => {
-    let retryCount = 0;
-    const maxRetries = 10;
-    const retryInterval = 1000; // 1 second
-
     const handleHashChange = async () => {
       const hash = window.location.hash;
       if (hash && hash.length > 1) {
         const magnetUri = decodeURIComponent(hash.slice(1));
-        const tryAddTorrent = async () => {
-          try {
-            await addTorrent(magnetUri);
-            // Clear the hash after adding the torrent
-            window.history.replaceState(null, '', window.location.pathname);
-          } catch (err) {
-            console.log(`Attempt ${retryCount + 1}/${maxRetries}: WebTorrent client not ready yet...`);
-            if (retryCount < maxRetries) {
-              retryCount++;
-              // Try again after a delay
-              setTimeout(tryAddTorrent, retryInterval);
-            } else {
-              console.error('Failed to add torrent from URL after multiple retries:', err);
-            }
-          }
-        };
-
-        if (!isLoading) {
-          await tryAddTorrent();
-        } else {
-          // If still loading, wait a bit and try again
-          setTimeout(tryAddTorrent, retryInterval);
+        
+        // Wait for client to be ready
+        if (isLoading) {
+          console.log('Waiting for WebTorrent client to initialize...');
+        }
+        
+        try {
+          await addTorrent(magnetUri);
+          // Clear the hash after adding the torrent
+          window.history.replaceState(null, '', window.location.pathname);
+        } catch (err) {
+          console.error('Failed to add torrent from URL:', err);
         }
       }
     };
 
+    // Only try to add torrent if client is ready
+    if (!isLoading) {
+      handleHashChange();
+    }
+
     // Check hash on mount and when it changes
     window.addEventListener('hashchange', handleHashChange);
-    handleHashChange();
-
     return () => window.removeEventListener('hashchange', handleHashChange);
   }, [addTorrent, isLoading]);
 

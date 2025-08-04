@@ -11,9 +11,8 @@ export const useWebTorrent = () => {
   const [error, setError] = useState<string | null>(null);
   const [opfsSupported, setOpfsSupported] = useState(false);
   const [storageInfo, setStorageInfo] = useState<StorageEstimate | null>(null);
-  const pendingTorrents = useRef<string[]>([]);
   const [clientReady, setClientReady] = useState(false);
-  const pendingTorrents = React.useRef<string[]>([]);
+  const initializationPromise = useRef<Promise<void>>();
 
   // Convert WebTorrent instance to TorrentInfo
   const convertTorrent = useCallback((torrent: any, storedMeta?: StoredTorrentMeta): TorrentInfo => {
@@ -180,6 +179,15 @@ export const useWebTorrent = () => {
 
         setClient(webTorrentClient);
 
+        // Wait for client to be ready
+        await new Promise<void>((resolve) => {
+          if (webTorrentClient.ready) {
+            resolve();
+          } else {
+            webTorrentClient.once('ready', () => resolve());
+          }
+        });
+
         // Load existing torrents after client is ready
         if (supported) {
           await loadExistingTorrents(webTorrentClient);
@@ -188,6 +196,8 @@ export const useWebTorrent = () => {
           webTorrentClient.destroy();
           return;
         }
+
+        setClientReady(true);
         setIsLoading(false);
 
       } catch (err) {
