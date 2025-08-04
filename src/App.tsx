@@ -27,16 +27,36 @@ function App() {
 
   // Handle torrent from URL hash
   React.useEffect(() => {
+    let retryCount = 0;
+    const maxRetries = 10;
+    const retryInterval = 1000; // 1 second
+
     const handleHashChange = async () => {
       const hash = window.location.hash;
       if (hash && hash.length > 1) {
-        try {
-          const magnetUri = decodeURIComponent(hash.slice(1));
-          await addTorrent(magnetUri);
-          // Clear the hash after adding the torrent
-          window.history.replaceState(null, '', window.location.pathname);
-        } catch (err) {
-          console.error('Failed to add torrent from URL:', err);
+        const magnetUri = decodeURIComponent(hash.slice(1));
+        const tryAddTorrent = async () => {
+          try {
+            await addTorrent(magnetUri);
+            // Clear the hash after adding the torrent
+            window.history.replaceState(null, '', window.location.pathname);
+          } catch (err) {
+            console.log(`Attempt ${retryCount + 1}/${maxRetries}: WebTorrent client not ready yet...`);
+            if (retryCount < maxRetries) {
+              retryCount++;
+              // Try again after a delay
+              setTimeout(tryAddTorrent, retryInterval);
+            } else {
+              console.error('Failed to add torrent from URL after multiple retries:', err);
+            }
+          }
+        };
+
+        if (!isLoading) {
+          await tryAddTorrent();
+        } else {
+          // If still loading, wait a bit and try again
+          setTimeout(tryAddTorrent, retryInterval);
         }
       }
     };
@@ -46,7 +66,7 @@ function App() {
     handleHashChange();
 
     return () => window.removeEventListener('hashchange', handleHashChange);
-  }, [addTorrent]);
+  }, [addTorrent, isLoading]);
 
   return (
     <div className="min-h-screen bg-gray-50">

@@ -11,6 +11,9 @@ export const useWebTorrent = () => {
   const [error, setError] = useState<string | null>(null);
   const [opfsSupported, setOpfsSupported] = useState(false);
   const [storageInfo, setStorageInfo] = useState<StorageEstimate | null>(null);
+  const pendingTorrents = useRef<string[]>([]);
+  const [clientReady, setClientReady] = useState(false);
+  const pendingTorrents = React.useRef<string[]>([]);
 
   // Convert WebTorrent instance to TorrentInfo
   const convertTorrent = useCallback((torrent: any, storedMeta?: StoredTorrentMeta): TorrentInfo => {
