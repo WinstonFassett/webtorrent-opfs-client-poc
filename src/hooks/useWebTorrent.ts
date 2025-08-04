@@ -468,8 +468,8 @@ export const useWebTorrent = () => {
 
   // Calculate stats
   const stats = {
-    totalDownloadSpeed: torrents.reduce((sum, t) => sum + t.downloadSpeed, 0),
-    totalUploadSpeed: torrents.reduce((sum, t) => sum + t.uploadSpeed, 0),
+    totalDownloadSpeed: torrents.reduce((sum, t) => sum + (t.downloadSpeed ?? 0), 0),
+    totalUploadSpeed: torrents.reduce((sum, t) => sum + (t.uploadSpeed ?? 0), 0),
     totalPeers: torrents.reduce((sum, t) => sum + t.numPeers, 0),
     totalSize: torrents.reduce((sum, t) => sum + t.length, 0),
     activeTorrents: torrents.filter(t => !t.paused).length
