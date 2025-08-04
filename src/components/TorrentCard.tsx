@@ -30,7 +30,10 @@ export const TorrentCard: React.FC<TorrentCardProps> = ({
 
   const showQRCode = async () => {
     try {
-      const qrDataURL = await QRCode.toDataURL(torrent.magnetURI, {
+      // Create a URL that points back to this app with the magnet link in the hash
+      const appUrl = new URL(window.location.href);
+      appUrl.hash = encodeURIComponent(torrent.magnetURI);
+      const qrDataURL = await QRCode.toDataURL(appUrl.toString(), {
         width: 300,
         margin: 2,
       });

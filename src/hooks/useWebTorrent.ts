@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import WebTorrent from 'webtorrent';
 import { TorrentInfo } from '../types';
 import { opfsManager, StoredTorrentMeta } from '../utils/opfs';
@@ -11,6 +11,8 @@ export const useWebTorrent = () => {
   const [error, setError] = useState<string | null>(null);
   const [opfsSupported, setOpfsSupported] = useState(false);
   const [storageInfo, setStorageInfo] = useState<StorageEstimate | null>(null);
+  const [clientReady, setClientReady] = useState(false);
+  const initializationPromise = useRef<Promise<void>>();
 
   // Convert WebTorrent instance to TorrentInfo
   const convertTorrent = useCallback((torrent: any, storedMeta?: StoredTorrentMeta): TorrentInfo => {
@@ -177,6 +179,15 @@ export const useWebTorrent = () => {
 
         setClient(webTorrentClient);
 
+        // Wait for client to be ready
+        await new Promise<void>((resolve) => {
+          if (webTorrentClient.ready) {
+            resolve();
+          } else {
+            webTorrentClient.once('ready', () => resolve());
+          }
+        });
+
         // Load existing torrents after client is ready
         if (supported) {
           await loadExistingTorrents(webTorrentClient);
@@ -185,6 +196,8 @@ export const useWebTorrent = () => {
           webTorrentClient.destroy();
           return;
         }
+
+        setClientReady(true);
         setIsLoading(false);
 
       } catch (err) {
@@ -455,8 +468,8 @@ export const useWebTorrent = () => {
 
   // Calculate stats
   const stats = {
-    totalDownloadSpeed: torrents.reduce((sum, t) => sum + t.downloadSpeed, 0),
-    totalUploadSpeed: torrents.reduce((sum, t) => sum + t.uploadSpeed, 0),
+    totalDownloadSpeed: torrents.reduce((sum, t) => sum + (t.downloadSpeed ?? 0), 0),
+    totalUploadSpeed: torrents.reduce((sum, t) => sum + (t.uploadSpeed ?? 0), 0),
     totalPeers: torrents.reduce((sum, t) => sum + t.numPeers, 0),
     totalSize: torrents.reduce((sum, t) => sum + t.length, 0),
     activeTorrents: torrents.filter(t => !t.paused).length

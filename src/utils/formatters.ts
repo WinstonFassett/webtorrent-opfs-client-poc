@@ -7,7 +7,7 @@ export const formatBytes = (bytes: number): string => {
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`;
 };
 
-export const formatSpeed = (bytesPerSecond: number): string => {
+export const formatSpeed = (bytesPerSecond: number = 0): string => {
   if (typeof bytesPerSecond !== 'number' || isNaN(bytesPerSecond)) return '0 B/s';
   return `${formatBytes(bytesPerSecond)}/s`;
 };

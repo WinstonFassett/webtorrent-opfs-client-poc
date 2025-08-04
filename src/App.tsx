@@ -25,6 +25,38 @@ function App() {
 
   const [showAddModal, setShowAddModal] = React.useState(false);
 
+  // Handle torrent from URL hash
+  React.useEffect(() => {
+    const handleHashChange = async () => {
+      const hash = window.location.hash;
+      if (hash && hash.length > 1) {
+        const magnetUri = decodeURIComponent(hash.slice(1));
+        
+        // Wait for client to be ready
+        if (isLoading) {
+          console.log('Waiting for WebTorrent client to initialize...');
+        }
+        
+        try {
+          await addTorrent(magnetUri);
+          // Clear the hash after adding the torrent
+          window.history.replaceState(null, '', window.location.pathname);
+        } catch (err) {
+          console.error('Failed to add torrent from URL:', err);
+        }
+      }
+    };
+
+    // Only try to add torrent if client is ready
+    if (!isLoading) {
+      handleHashChange();
+    }
+
+    // Check hash on mount and when it changes
+    window.addEventListener('hashchange', handleHashChange);
+    return () => window.removeEventListener('hashchange', handleHashChange);
+  }, [addTorrent, isLoading]);
+
   return (
     <div className="min-h-screen bg-gray-50">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
